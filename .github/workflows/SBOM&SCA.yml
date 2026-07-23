@@ -1,0 +1,46 @@
+# .github/workflows/sbom-sca.yml
+# SBOM (inventaire des dépendances) + SCA (recherche de CVE dedans).
+# SBOM != SAST != DAST : c'est de la Software Composition Analysis.
+
+name: SBOM & SCA
+
+on:
+  workflow_dispatch:            # lancement manuel
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  sbom:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 1) SBOM : inventaire des composants du repo (Syft)
+      - name: Générer le SBOM
+        uses: anchore/sbom-action@v0     # v0 = dernière version -> corrige le bug d'artefact
+        with:
+          path: "."                      # scanne le repo (exclusif avec image: / file:)
+          format: spdx-json
+          output-file: sbom.spdx.json
+          artifact-name: sbom-spdx       # nom d'artefact simple et valide
+
+      # 2) SCA : chercher les CVE dans les composants du SBOM (Grype)
+      - name: Scanner les vulnérabilités du SBOM
+        uses: anchore/scan-action@v6
+        with:
+          sbom: sbom.spdx.json
+          fail-build: false              # ne casse pas le build sur findings
+          severity-cutoff: medium
+          output-format: sarif
+
+      # 3) Récupérer le rapport CVE (results.sarif, comme pour Bandit)
+      - name: Upload rapport SCA
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sca-cve-report
+          path: results.sarif
