@@ -1,46 +1,55 @@
 # .github/workflows/dast-zap.yml
-# DAST (Dynamic Application Security Testing) avec OWASP ZAP.
-# ZAP est HTTP : il scanne la surface web de la cible, pas le S7comm/Modbus.
-# Ici la cible est le honeypot Conpot (interface HTTP sur le port 80).
+# DAST avec OWASP ZAP contre l'interface web d'OpenPLC (port 8080).
+# Le point clé : une étape qui ATTEND que la cible réponde avant de scanner.
 
 name: DAST - OWASP ZAP
 
 on:
-  workflow_dispatch:        # lancement manuel
+  workflow_dispatch:
   push:
     branches: [ main ]
 
 jobs:
   dast:
     runs-on: ubuntu-latest
-    name: Scan DAST (ZAP) contre le honeypot Conpot
+    name: DAST (ZAP) contre l'interface web OpenPLC
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 1) Démarrer la CIBLE : Conpot expose son interface HTTP sur le port 80
-      - name: Lancer Conpot (cible)
+      # 1) Construire et lancer la CIBLE : OpenPLC (web UI sur 8080)
+      #    Le build prend quelques minutes (compilation d'OpenPLC).
+      - name: Build & run OpenPLC
         run: |
-          docker run -d --name conpot \
-            -p 80:80 -p 102:102 -p 502:502 \
-            honeynet/conpot:latest
-          # Attendre que le service HTTP réponde avant de scanner
-          for i in $(seq 1 30); do
-            if curl -sf http://localhost:80 >/dev/null; then echo "Conpot up"; break; fi
-            sleep 2
-          done
+          git clone --depth 1 https://github.com/thiagoralves/OpenPLC_v3.git
+          docker build -t openplc:v3 OpenPLC_v3
+          docker run -d --name openplc --privileged -p 8080:8080 -p 502:502 openplc:v3
 
-      # 2) Scan DAST passif de la surface HTTP
+      # 2) BARRIERE : attendre que l'interface web reponde vraiment
+      #    (sinon on echoue avec un message clair au lieu du "spider failed")
+      - name: Attendre OpenPLC
+        run: |
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:8080/ >/dev/null; then
+              echo "OpenPLC est pret"; exit 0
+            fi
+            echo "attente d'OpenPLC... ($i)"; sleep 5
+          done
+          echo "::error::OpenPLC n'a pas repondu sur :8080"
+          docker logs openplc || true
+          exit 1
+
+      # 3) Scan DAST passif
       - name: OWASP ZAP Baseline Scan
         uses: zaproxy/action-baseline@v0.15.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           docker_name: 'ghcr.io/zaproxy/zaproxy:stable'
-          target: 'http://localhost:80'
-          cmd_options: '-a'               # inclut les règles passives "alpha"
-          allow_issue_writing: false      # ne crée pas d'issue automatiquement
+          target: 'http://localhost:8080'
+          cmd_options: '-a'
+          allow_issue_writing: false
 
-      # 3) Récupérer le rapport comme artefact du run
+      # 4) Recuperer le rapport
       - name: Upload rapport ZAP
         if: always()
         uses: actions/upload-artifact@v4
